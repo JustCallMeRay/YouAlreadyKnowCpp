@@ -7,6 +7,8 @@ This means we inherit the best parts of C and the worst.
 However C++ is good and offers the high level, safe alternatives we've come to expect from languages.
 I'll show you what these are, where to find them and how C++ is simpler than you probably gave it credit for.
 
+---
+
 ## C is evil
 
 In C the programmer is required to keep track of all heap storage, i.e.:
@@ -15,7 +17,9 @@ In C the programmer is required to keep track of all heap storage, i.e.:
 - Must be freed when done with
 - Cannot be used again after free
 
-Modern languages handle all this for us, C++ offers all common data structures whithout need to mess with memory.
+Modern languages handle all this for us, C++ offers all common data structures without need to mess with memory.
+
+---
 
 ## How to be safe
 
@@ -27,9 +31,13 @@ Most common problems people have can be solved by using the standard library:
 - Access out of bounds? Use bound checked lookups like `.at(size_t)`
 - Iterating through a container? use `for (auto item : container)`
 
+The vast majority of unsafe code does things in a C style rather than a C++ style. For example it is unlikely that a file handle would be leaked with C++'s `std::ostream` and much more likely with C's `fopen`.
+
+---
+
 ## Still struggling? WWPD
 
-What would python do?
+**W**hat **W**ould **P**ython **D**o?
 
 I think python and C++ are very similar and I think good C++ should resemble python.
 
@@ -61,6 +69,8 @@ No? you don't write python like that? then why write C++ like that?
 - How do I delete the memory so I don't leak it?
 Python: ` ` (Garbage collector handles it)
 C++: ` ` (Item leaves the stack and destructor handles it)
+
+---
 
 ## I can't use the standard library
 
@@ -111,9 +121,30 @@ This gives us the output:
 
 To force collegues to listen to these use: `-Werror` or if the code is already filled with warnings turn some into errors with `-Werror=` and hide it in the build script so they can't turn it off.
 
+---
+
 ## But UB!
 
-You can run your code with UB sanitizers, this means that any code that executes UB will cause a crash. In gcc it's two lines, relalisticlly you should be running all your tests with ASAN and UBSAN even if your code is known safe.
+UB is short for undefined behaviour, this is something that the C++ standard (usually intentionally and explictly) has not specified, usually because it would force a compramise onto the user. 
+
+For example if I add two numbers and attempt to store the result in a space that is too small to store that number I can:
+1. Store the result in a larger amount of memory, check if it's bigger than max of the small amount of memory, crash or put it in the smaller bit of memory.
+2. Use some CPU trickery to set a flag if an overflow has occured
+3. Do all maths with dynamically sized storeage and grow it if required
+4. Do a saturated add
+5. Do an overflow
+
+In 1 we slow the code down (a little, mostly through register contention), in 2 we limit compilation to CPUs with this special magic, in 3 we limit ourselves to processors with dynamically resizable memory (no GPUs), 4 and 5 make enforcements on the processor that might benfit one but be terrible for another (cannot mask int maths as float maths on certain GPUs)
+
+
+You can run your code with UB sanitizers, this means that any code that executes UB will cause a crash. In gcc it's two lines.
+
+[//]: # (Vertical slide)
+
+### But Rust!
+For this example Rust crashes on debug but overflows on Release, it's effectively the same as C++ but with slower int maths on some GPUs (compromise 5).
+
+---
 
 ## BUT UB!!
 
@@ -121,20 +152,88 @@ Still not convinced?
 
 The `constexpr` keyword was introduced in C++14 and runs code at compile time*. Any code ran at compile time cannot execute undefined behaviour, so will result in a compilation failure if attempted. So any code you can test at compile time is guarenteed to not contain undefined behaviour.
 
+[//]: # (Vertical slide)
 
-\* Technically it must run any time before the program runs, so on embeded devices this might be on device start but realisticlly it's at compile time.
+\* Technically constexpr code must run any time before the program runs, so on embeded devices this might be on device start but realisticlly it's at compile time. 
+
+Again the standard is written this way to allow for different processors to handle things differently, for example if I am compiling for some processor that has much more precise float handling, I probably don't want to use the processor I am compiling the code with to do all my maths.
+
+---
 
 ## But garbage collection?
 
-### Functions:
+## Functions
+
+----
+
+### GC: Functions:
 We know that any object going into a function as an argument has a lifetime greater than the local scope of the function.
 
-We (and the compiler) know that any local data inside the function we want to end up outside of the local scope must be copied or moved to that outer scope.
+```C++
+void foo(int& in) {
+	// We know that in is always valid in this scope
+	in += 1;
+}
 
-If we do something silly: `int& foo() { return 1; }` the compiler fails. If we are more determined about our sillyness, `int& foo() { int i = 0; return i}`, the compiler warns us:
+// We know that a is always valid in this scope
+int a = 1;
+foo(a);
+```
+Here `a` goes through `foo` as argument `in`, we know the whole time it's safe.
+
+
+[//]: # (Vertical slide)
+
+Following the above statement, we (and the compiler) know that any local data inside the function we want to end up outside of the local scope must be moved (or copied) to that outer scope. So:
+```C++
+int foo(int& in) {
+	int i = 1;
+	return i; // (free) Implicit move  
+}
+```
+Or a copy if object is not movable
+```
+struct NoMove {  NoMove(NoMove&&) = delete; };
+NoMove foo() {
+	return NoMove{}; // Implicit copy (cannot move because we deleted it), (also usually free)
+}
+```
+
+[//]: # (Vertical slide)
+
+If we do something silly like: `int& foo() { return 1; }` the compiler errors. If we are more determined about our sillyness, `int& foo() { int i = 0; return i}`, the compiler warns us:
 ```
 warning: reference to local variable 'i' returned [-Wreturn-local-addr]
    10 | int& foo() { int i = 0; return i; }`
 	  |                                ^
 ```
-So naturally: `-Werror=return-local-addr`.
+So naturally, use `-Werror=return-local-addr`. (Enforced in C++26)
+
+---
+
+### GC: Classes:
+
+
+
+We can normally see structs or classes (the same thing) as a very similar extenstion of this concept: 
+```C++
+struct IntRefWrapper {
+	IntRefWrapper(int& wrappedInt) : m_wrappedInt{wrappedInt} {}
+	int& m_wrappedInt;
+};
+
+{
+	int a = 1;
+	IntRefWrapper b{a};
+}
+```
+
+
+
+
+
+
+
+
+
+
